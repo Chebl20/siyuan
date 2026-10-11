@@ -33,6 +33,7 @@ import (
 	"github.com/88250/lute/ast"
 	"github.com/88250/lute/parse"
 	"github.com/siyuan-note/logging"
+	"github.com/siyuan-note/siyuan/kernel/indexstore/postgres"
 	"github.com/siyuan-note/siyuan/kernel/util"
 )
 
@@ -57,6 +58,11 @@ var (
 func initDatabase(forceRebuild bool) {
 	initDatabaseLock.Lock()
 	defer initDatabaseLock.Unlock()
+
+	if util.UsePostgresIndex() {
+		initPostgresBlockTree(forceRebuild)
+		return
+	}
 
 	initDBConnection()
 
@@ -90,6 +96,25 @@ func initDatabase(forceRebuild bool) {
 	vacuum()
 
 	logging.LogInfof("reinitialized database [%s]", util.BlockTreeDBPath)
+}
+
+func initPostgresBlockTree(forceRebuild bool) {
+	closeDatabase()
+	opened, err := postgres.Open(util.PostgresDatabaseURL(), 7)
+	if err != nil {
+		logging.LogFatalf(logging.ExitCodeUnavailableDatabase, "open postgres block tree failed: %s", err)
+	}
+	if err = postgres.Migrate(opened); err != nil {
+		opened.Close()
+		logging.LogFatalf(logging.ExitCodeUnavailableDatabase, "migrate postgres block tree failed: %s", err)
+	}
+	db = opened
+	if !forceRebuild {
+		return
+	}
+	if _, err = db.Exec("TRUNCATE TABLE blocktrees_row RESTART IDENTITY"); err != nil {
+		logging.LogFatalf(logging.ExitCodeUnavailableDatabase, "truncate postgres block tree failed: %s", err)
+	}
 }
 
 func initDBTables() {
@@ -819,6 +844,9 @@ func UpsertBlockTree(tree *parse.Tree) {
 
 func execInsertBlocktrees(tx *sql.Tx, tree *parse.Tree, changedNodes []*ast.Node) {
 	sqlStmt := "INSERT INTO blocktrees (id, root_id, parent_id, box_id, path, hpath, updated, type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+	if util.UsePostgresIndex() && (IsEncryptedBoxFn == nil || !IsEncryptedBoxFn(tree.Box)) {
+		sqlStmt += " ON CONFLICT (id) DO UPDATE SET root_id = EXCLUDED.root_id, parent_id = EXCLUDED.parent_id, box_id = EXCLUDED.box_id, path = EXCLUDED.path, hpath = EXCLUDED.hpath, updated = EXCLUDED.updated, type = EXCLUDED.type"
+	}
 	stmt, err := tx.Prepare(sqlStmt)
 	if err != nil {
 		tx.Rollback()

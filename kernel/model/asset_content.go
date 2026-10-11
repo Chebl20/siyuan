@@ -72,12 +72,20 @@ func GetAssetContent(id, query string, queryMethod int) (ret *AssetContent) {
 	filter := "id = ?"
 	args := []any{id}
 	if "" != query {
-		filter += " AND `" + table + "` MATCH ?"
-		args = append(args, buildAssetContentColumnFilter()+":("+query+")")
+		if sql.UsePostgres() {
+			filter += " AND EXISTS (SELECT 1 FROM asset_content_search acs WHERE acs.path = " + table + ".path AND acs.search_vector @@ websearch_to_tsquery('simple', ?))"
+			args = append(args, query)
+		} else {
+			filter += " AND `" + table + "` MATCH ?"
+			args = append(args, buildAssetContentColumnFilter()+":("+query+")")
+		}
 	}
 
-	projections := "id, name, ext, path, size, updated, " +
-		"highlight(" + table + ", 6, '" + search.SearchMarkLeft + "', '" + search.SearchMarkRight + "') AS content"
+	projections := "id, name, ext, path, size, updated, content"
+	if !sql.UsePostgres() {
+		projections = "id, name, ext, path, size, updated, " +
+			"highlight(" + table + ", 6, '" + search.SearchMarkLeft + "', '" + search.SearchMarkRight + "') AS content"
+	}
 	stmt := "SELECT " + projections + " FROM " + table + " WHERE " + filter
 	assetContents := sql.SelectAssetContentsRawStmtNoParseArgs(stmt, args, 1)
 	results := fromSQLAssetContents(&assetContents)
@@ -170,7 +178,11 @@ func fullTextSearchAssetContentByRegexp(exp, typeFilter string, typeArgs []any, 
 }
 
 func assetContentFieldRegexp(exp string) (clause string, args []any) {
-	clause = "(name REGEXP ? OR content REGEXP ?)"
+	if sql.UsePostgres() {
+		clause = "(name ~ ? OR content ~ ?)"
+	} else {
+		clause = "(name REGEXP ? OR content REGEXP ?)"
+	}
 	args = []any{exp, exp}
 	return
 }
@@ -189,6 +201,9 @@ func fullTextSearchAssetContentCountByRegexp(exp, typeFilter string, typeArgs []
 }
 
 func fullTextSearchAssetContentByFTS(query, typeFilter string, typeArgs []any, orderBy string, page, pageSize int) (ret []*AssetContent, matchedAssetCount int) {
+	if sql.UsePostgres() {
+		return postgresAssetContentSearch(query, typeFilter, typeArgs, orderBy, page, pageSize)
+	}
 	table := "asset_contents_fts_case_insensitive"
 	projections := "id, name, ext, path, size, updated, " +
 		"snippet(" + table + ", 6, '" + search.SearchMarkLeft + "', '" + search.SearchMarkRight + "', '...', 64) AS content"
@@ -204,6 +219,44 @@ func fullTextSearchAssetContentByFTS(query, typeFilter string, typeArgs []any, o
 	}
 
 	matchedAssetCount = fullTextSearchAssetContentCount(query, typeFilter, typeArgs)
+	return
+}
+
+func postgresAssetContentSearch(query, typeFilter string, typeArgs []any, orderBy string, page, pageSize int) (ret []*AssetContent, matchedAssetCount int) {
+	table := "asset_contents_fts_case_insensitive"
+	opts := "StartSel=" + search.SearchMarkLeft + ",StopSel=" + search.SearchMarkRight + ",MaxWords=35,MinWords=15,MaxFragments=1"
+	projections := "a.id, a.name, a.ext, a.path, a.size, a.updated, ts_headline('simple', a.content, websearch_to_tsquery('simple', ?), '" + opts + "') AS content"
+	stmt := "SELECT " + projections + " FROM " + table + " a WHERE EXISTS (SELECT 1 FROM asset_content_search acs WHERE acs.path = a.path AND acs.search_vector @@ websearch_to_tsquery('simple', ?))" + typeFilter
+	stmt += " " + strings.ReplaceAll(orderBy, "rank", "0")
+	stmt += " LIMIT " + strconv.Itoa(pageSize) + " OFFSET " + strconv.Itoa((page-1)*pageSize)
+	args := []any{query, query}
+	args = append(args, typeArgs...)
+	assetContents := sql.SelectAssetContentsRawStmtNoParseArgs(stmt, args, Conf.Search.Limit)
+	ret = fromSQLAssetContents(&assetContents)
+	if 1 > len(ret) {
+		ret = []*AssetContent{}
+	}
+	matchedAssetCount = postgresAssetContentCount(query, typeFilter, typeArgs)
+	return
+}
+
+func postgresAssetContentCount(query, typeFilter string, typeArgs []any) (matchedAssetCount int) {
+	table := "asset_contents_fts_case_insensitive"
+	stmt := "SELECT COUNT(a.path) AS assets FROM " + table + " a WHERE EXISTS (SELECT 1 FROM asset_content_search acs WHERE acs.path = a.path AND acs.search_vector @@ websearch_to_tsquery('simple', ?))" + typeFilter
+	args := []any{query}
+	args = append(args, typeArgs...)
+	result, _ := sql.QueryAssetContentNoLimitArgs(stmt, args...)
+	if 1 > len(result) {
+		return
+	}
+	switch n := result[0]["assets"].(type) {
+	case int64:
+		matchedAssetCount = int(n)
+	case int32:
+		matchedAssetCount = int(n)
+	case int:
+		matchedAssetCount = n
+	}
 	return
 }
 
@@ -239,6 +292,9 @@ func searchAssetContentBySQL(stmt string, page, pageSize int) (ret []*AssetConte
 
 func fullTextSearchAssetContentCount(query, typeFilter string, typeArgs []any) (matchedAssetCount int) {
 	query = filterQueryInvisibleChars(query)
+	if sql.UsePostgres() {
+		return postgresAssetContentCount(query, typeFilter, typeArgs)
+	}
 
 	table := "asset_contents_fts_case_insensitive"
 	stmt := "SELECT COUNT(path) AS `assets` FROM `" + table + "` WHERE `" + table + "` MATCH ?" + typeFilter

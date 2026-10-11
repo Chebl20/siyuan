@@ -22,6 +22,8 @@ import (
 	"strings"
 
 	"github.com/siyuan-note/eventbus"
+	"github.com/siyuan-note/siyuan/kernel/indexstore"
+	"github.com/siyuan-note/siyuan/kernel/search"
 )
 
 type AssetContent struct {
@@ -79,8 +81,22 @@ func insertAssetContents0(tx *sql.Tx, bulk []*AssetContent, context map[string]a
 	}
 
 	stmt := fmt.Sprintf(AssetContentsFTSCaseInsensitiveInsert, strings.Join(valueStrings, ","))
+	if isPostgresTx(tx) {
+		stmt = strings.Replace(stmt, "asset_contents_fts_case_insensitive", "asset_contents", 1)
+		stmt = indexstore.ConflictUpdate(stmt, []string{"path"})
+	}
 	if err = prepareExecInsertTx(tx, stmt, valueArgs); err != nil {
 		return
+	}
+	if isPostgresTx(tx) {
+		for _, assetContent := range bulk {
+			text := search.NormalizeSearchText(assetContent.Name+"\n"+assetContent.Content, caseSensitive, hanSensitive)
+			searchStmt := `INSERT INTO asset_content_search (path, search_vector) VALUES (?, to_tsvector('simple', ?))
+				ON CONFLICT (path) DO UPDATE SET search_vector = EXCLUDED.search_vector`
+			if err = execStmtTx(tx, searchStmt, assetContent.Path, text); err != nil {
+				return
+			}
+		}
 	}
 
 	eventbus.Publish(eventbus.EvtSQLInsertAssetContent, context)

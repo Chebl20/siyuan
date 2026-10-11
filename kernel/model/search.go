@@ -2252,6 +2252,9 @@ func fullTextSearchRefBlock(keyword string, beforeLen int, onlyDoc bool) (ret []
 // fullTextSearchRefBlockInBox 与 fullTextSearchRefBlock 一致，但按 boxID 路由到加密 db 或全局 db。
 func fullTextSearchRefBlockInBox(keyword string, beforeLen int, onlyDoc bool, boxID string) (ret []*Block) {
 	keyword = filterQueryInvisibleChars(keyword)
+	if sql.PostgresPlain(boxID) && !ast.IsNodeIDPattern(keyword) {
+		return postgresRefSearch(keyword, beforeLen, onlyDoc, boxID)
+	}
 
 	if id := extractID(keyword); "" != id {
 		ret, _, _ = searchBySQLInBox("SELECT * FROM `blocks` WHERE `id` = '"+id+"'", 36, 1, 32, boxID)
@@ -2379,7 +2382,7 @@ func fullTextSearchByRegexp(exp, boxFilter, pathFilter string, boxArgs, pathArgs
 }
 
 func fullTextSearchByRegexpInBox(exp, boxFilter, pathFilter string, boxArgs, pathArgs []any, typeFilter, ignoreFilter, orderBy string, beforeLen, page, pageSize int, boxID string) (ret []*Block, matchedBlockCount, matchedRootCount int) {
-	fieldFilter := fieldRegexp(exp)
+	fieldFilter := searchFieldFilter(exp, boxID)
 	stmt := "SELECT * FROM `blocks` WHERE " + fieldFilter + " AND " + typeFilter
 	stmt += boxFilter + pathFilter + ignoreFilter + " " + orderBy
 	regex, err := regexp.Compile(exp)
@@ -2405,7 +2408,7 @@ func fullTextSearchCountByRegexp(exp, boxFilter, pathFilter string, boxArgs, pat
 }
 
 func fullTextSearchCountByRegexpInBox(exp, boxFilter, pathFilter string, boxArgs, pathArgs []any, typeFilter, ignoreFilter, boxID string) (matchedBlockCount, matchedRootCount int) {
-	fieldFilter := fieldRegexp(exp)
+	fieldFilter := searchFieldFilter(exp, boxID)
 	stmt := "SELECT COUNT(id) AS `matches`, COUNT(DISTINCT(root_id)) AS `docs` FROM `blocks` WHERE " + fieldFilter + " AND " + typeFilter + ignoreFilter
 	stmt += boxFilter + pathFilter
 	args := append(append([]any{}, boxArgs...), pathArgs...)
@@ -2423,6 +2426,9 @@ func fullTextSearchByFTS(query, boxFilter, pathFilter string, boxArgs, pathArgs 
 }
 
 func fullTextSearchByFTSInBox(query, boxFilter, pathFilter string, boxArgs, pathArgs []any, typeFilter, ignoreFilter, orderBy string, beforeLen, page, pageSize int, boxID string) (ret []*Block, matchedBlockCount, matchedRootCount int) {
+	if sql.PostgresPlain(boxID) {
+		return postgresFullTextSearchBlocks(query, boxFilter, pathFilter, boxArgs, pathArgs, typeFilter, ignoreFilter, orderBy, beforeLen, page, pageSize, boxID)
+	}
 	table := "blocks_fts"
 	projections := "id, parent_id, root_id, hash, box, path, " +
 		// Search result content snippet returns more text https://github.com/siyuan-note/siyuan/issues/10707
@@ -2452,6 +2458,9 @@ func fullTextSearchByFTSInBox(query, boxFilter, pathFilter string, boxArgs, path
 }
 
 func fullTextSearchByFTSAndHPathInBox(rawQuery, query, boxFilter, pathFilter string, boxArgs, pathArgs []any, typeFilter, ignoreFilter string, orderBy, beforeLen, page, pageSize int, boxID string) (ret []*Block, matchedBlockCount, matchedRootCount int) {
+	if sql.PostgresPlain(boxID) {
+		return postgresFullTextSearchWithHPath(rawQuery, query, boxFilter, pathFilter, boxArgs, pathArgs, typeFilter, ignoreFilter, orderBy, beforeLen, page, pageSize, boxID)
+	}
 	cte, args := buildFTSAndHPathMatchesCTE(rawQuery, query, boxFilter, pathFilter, boxArgs, pathArgs, typeFilter, ignoreFilter)
 	stmt := cte + " SELECT b.rowid AS block_rowid, matches.match_source FROM matches JOIN blocks b ON b.rowid = matches.block_rowid"
 	stmt += " " + buildHPathSearchOrderBy(rawQuery, orderBy)
@@ -2704,6 +2713,9 @@ func fullTextSearchCountByFTS(query, boxFilter, pathFilter string, boxArgs, path
 }
 
 func fullTextSearchCountByFTSInBox(query, boxFilter, pathFilter string, boxArgs, pathArgs []any, typeFilter, ignoreFilter, boxID string) (matchedBlockCount, matchedRootCount int) {
+	if sql.PostgresPlain(boxID) {
+		return postgresFullTextSearchCount(query, boxFilter, pathFilter, boxArgs, pathArgs, typeFilter, ignoreFilter, boxID)
+	}
 	table := "blocks_fts"
 
 	stmt := "SELECT COUNT(id) AS `matches`, COUNT(DISTINCT(root_id)) AS `docs` FROM `" + table + "` WHERE (`" + table + "` MATCH ?"
@@ -2734,6 +2746,9 @@ func fullTextSearchByLikeWithRootInBox(query, boxFilter, pathFilter string, boxA
 	args := append(append([]any{}, boxArgs...), pathArgs...)
 	args = append(args, append(append([]any{}, boxArgs...), pathArgs...)...)
 	selectStmt := buildDocumentSearchStatement(rawQuery, keywords, typeFilter, boxFilter, pathFilter, ignoreFilter, orderBy, page, pageSize, searchHPath)
+	if sql.PostgresPlain(boxID) {
+		selectStmt = adaptDocumentSearchPostgres(selectStmt)
+	}
 	result, _ := sql.QueryNoLimitArgsInBox(selectStmt, boxID, args...)
 	resultBlocks := sql.ToBlocks(result)
 	if 0 < len(resultBlocks) {
@@ -2884,6 +2899,9 @@ func highlightByFTS(query, typeFilter, id string) (ret []string) {
 
 // highlightByFTSInBox 与 highlightByFTS 一致，但按 boxID 路由到加密 db 或全局 db。
 func highlightByFTSInBox(query, typeFilter, id, boxID string) (ret []string) {
+	if sql.PostgresPlain(boxID) {
+		return postgresHighlight(query, typeFilter, id, boxID)
+	}
 	query = strings.ReplaceAll(query, " ", " OR ")
 	const limit = 256
 	table := "blocks_fts"
@@ -2943,7 +2961,7 @@ func highlightByRegexp(query, typeFilter, id string) (ret []string) {
 
 // highlightByRegexpInBox 与 highlightByRegexp 一致，但按 boxID 路由到加密 db 或全局 db。
 func highlightByRegexpInBox(query, typeFilter, id, boxID string) (ret []string) {
-	fieldFilter := fieldRegexp(query)
+	fieldFilter := searchFieldFilter(query, boxID)
 	stmt := "SELECT * FROM `blocks` WHERE " + fieldFilter + " AND " + typeFilter
 	stmt += " AND root_id = '" + id + "'"
 	regex, _ := regexp.Compile(query)
@@ -3145,36 +3163,42 @@ func maxContent(content string, maxLen int) string {
 	return content
 }
 
-func fieldRegexp(regexp string) string {
-	regexp = strings.ReplaceAll(regexp, "'", "''") // 不需要转义双引号，因为条件都是通过单引号包裹的，只需要转义单引号即可
+func fieldRegexp(expr string) string {
+	return fieldCompare(expr, "REGEXP")
+}
+
+func fieldCompare(expr, op string) string {
+	expr = strings.ReplaceAll(expr, "'", "''") // 不需要转义双引号，因为条件都是通过单引号包裹的，只需要转义单引号即可
+	write := func(buf *bytes.Buffer, field string) {
+		buf.WriteString(field)
+		buf.WriteByte(' ')
+		buf.WriteString(op)
+		buf.WriteString(" '")
+		buf.WriteString(expr)
+		buf.WriteByte('\'')
+	}
 	buf := bytes.Buffer{}
 	buf.WriteString("(")
-	buf.WriteString("content REGEXP '")
-	buf.WriteString(regexp)
-	buf.WriteString("'")
+	write(&buf, "content")
 	if Conf.Search.Name {
-		buf.WriteString(" OR name REGEXP '")
-		buf.WriteString(regexp)
-		buf.WriteString("'")
+		buf.WriteString(" OR ")
+		write(&buf, "name")
 	}
 	if Conf.Search.Alias {
-		buf.WriteString(" OR alias REGEXP '")
-		buf.WriteString(regexp)
-		buf.WriteString("'")
+		buf.WriteString(" OR ")
+		write(&buf, "alias")
 	}
 	if Conf.Search.Memo {
-		buf.WriteString(" OR memo REGEXP '")
-		buf.WriteString(regexp)
-		buf.WriteString("'")
+		buf.WriteString(" OR ")
+		write(&buf, "memo")
 	}
 	if Conf.Search.IAL {
-		buf.WriteString(" OR ial REGEXP '")
-		buf.WriteString(regexp)
-		buf.WriteString("'")
+		buf.WriteString(" OR ")
+		write(&buf, "ial")
 	}
-	buf.WriteString(" OR tag REGEXP '")
-	buf.WriteString(regexp)
-	buf.WriteString("')")
+	buf.WriteString(" OR ")
+	write(&buf, "tag")
+	buf.WriteByte(')')
 	return buf.String()
 }
 

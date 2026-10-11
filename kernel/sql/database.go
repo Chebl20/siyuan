@@ -104,6 +104,10 @@ func initDatabase(forceRebuild bool) {
 	defer enableCache()
 
 	util.IncBootProgress(2, util.BootL10n(301, "Initializing database..."))
+	if util.UsePostgresIndex() {
+		initPostgresIndex(forceRebuild)
+		return
+	}
 
 	if forceRebuild {
 		closeDatabase()
@@ -340,6 +344,11 @@ func InitHistoryDatabase(forceRebuild bool) {
 	initHistoryDatabaseLock.Lock()
 	defer initHistoryDatabaseLock.Unlock()
 
+	if util.UsePostgresIndex() {
+		initPostgresHistory(forceRebuild)
+		return
+	}
+
 	initHistoryDBConnection()
 
 	if !forceRebuild && gulu.File.IsExist(util.HistoryDBPath) {
@@ -413,6 +422,11 @@ var initAssetContentDatabaseLock = sync.Mutex{}
 func InitAssetContentDatabase(forceRebuild bool) {
 	initAssetContentDatabaseLock.Lock()
 	defer initAssetContentDatabaseLock.Unlock()
+
+	if util.UsePostgresIndex() {
+		initPostgresAssetContent(forceRebuild)
+		return
+	}
 
 	initAssetContentDBConnection()
 
@@ -491,7 +505,8 @@ var (
 func SetCaseSensitive(b bool) {
 	caseSensitive = b
 
-	if nil == db {
+	if nil == db || util.UsePostgresIndex() {
+		util.SearchCaseSensitive = b
 		return
 	}
 
@@ -1116,6 +1131,9 @@ func deleteBlocksByIDs(tx *sql.Tx, ids []string) (err error) {
 	if 1 > len(ids) {
 		return
 	}
+	if isPostgresTx(tx) {
+		return deleteBlocksByIDsPostgres(tx, ids)
+	}
 
 	var ftsIDs []string
 	for _, id := range ids {
@@ -1146,7 +1164,7 @@ func deleteBlocksByIDs(tx *sql.Tx, ids []string) (err error) {
 	}
 
 	stmt = "DELETE FROM blocks_fts WHERE ROWID IN (" + strings.Join(rowIDs, ",") + ")"
-	if err = execStmtTx(tx, stmt); err != nil {
+	if err = execSQLiteFTSDelete(tx, stmt); err != nil {
 		return
 	}
 
@@ -1169,7 +1187,7 @@ func deleteBlocksByBoxTx(tx *sql.Tx, box string) (err error) {
 	// external content 模式下 FTS 行需按 rowid 删除，rowid 来自 blocks 表，
 	// 因此必须先删 FTS（此时 blocks 尚在），再删 blocks，否则子查询查不到 rowid。
 	stmt := "DELETE FROM blocks_fts WHERE rowid IN (SELECT rowid FROM blocks WHERE box = ?)"
-	if err = execStmtTx(tx, stmt, box); err != nil {
+	if err = execSQLiteFTSDelete(tx, stmt, box); err != nil {
 		return
 	}
 	stmt = "DELETE FROM blocks WHERE box = ?"
@@ -1263,7 +1281,7 @@ func deleteFileAnnotationRefsByBoxTx(tx *sql.Tx, box string) (err error) {
 func deleteByRootID(tx *sql.Tx, rootID string, context map[string]any) (err error) {
 	// external content 模式下 FTS 行需按 rowid 删除，必须先删 FTS 再删 blocks。
 	stmt := "DELETE FROM blocks_fts WHERE rowid IN (SELECT rowid FROM blocks WHERE root_id = ?)"
-	if err = execStmtTx(tx, stmt, rootID); err != nil {
+	if err = execSQLiteFTSDelete(tx, stmt, rootID); err != nil {
 		return
 	}
 	stmt = "DELETE FROM blocks WHERE root_id = ?"
@@ -1304,7 +1322,7 @@ func batchDeleteByRootIDs(tx *sql.Tx, rootIDs []string, context map[string]any) 
 	ids = "('" + ids + "')"
 	// external content 模式下 FTS 行需按 rowid 删除，必须先删 FTS 再删 blocks。
 	stmt := "DELETE FROM blocks_fts WHERE rowid IN (SELECT rowid FROM blocks WHERE root_id IN " + ids + ")"
-	if err = execStmtTx(tx, stmt); err != nil {
+	if err = execSQLiteFTSDelete(tx, stmt); err != nil {
 		return
 	}
 	stmt = "DELETE FROM blocks WHERE root_id IN " + ids
@@ -1339,7 +1357,7 @@ func batchDeleteByRootIDs(tx *sql.Tx, rootIDs []string, context map[string]any) 
 func batchDeleteByPathPrefix(tx *sql.Tx, boxID, pathPrefix string) (err error) {
 	// external content 模式下 FTS 行需按 rowid 删除，必须先删 FTS 再删 blocks。
 	stmt := "DELETE FROM blocks_fts WHERE rowid IN (SELECT rowid FROM blocks WHERE box = ? AND path LIKE ?)"
-	if err = execStmtTx(tx, stmt, boxID, pathPrefix+"%"); err != nil {
+	if err = execSQLiteFTSDelete(tx, stmt, boxID, pathPrefix+"%"); err != nil {
 		return
 	}
 	stmt = "DELETE FROM blocks WHERE box = ? AND path LIKE ?"
@@ -1567,7 +1585,7 @@ func Exec(stmt string, args ...any) error {
 // migrateBlockEmbeddingsSchema 为 block_embeddings 幂等补充失败重试与忽略类型相关的列。
 // 不升 DatabaseVer（避免全库重建丢失已嵌入向量）；列已存在时跳过，老行自动取默认值 0。
 func migrateBlockEmbeddingsSchema() {
-	if nil == db {
+	if nil == db || util.UsePostgresIndex() {
 		return
 	}
 
@@ -1619,10 +1637,12 @@ func migrateBlockEmbeddingsSchema() {
 func beginTx() (tx *sql.Tx, err error) {
 	if tx, err = db.Begin(); err != nil {
 		logging.LogErrorf("begin tx failed: %s\n  %s", err, logging.ShortStack())
-		if strings.Contains(err.Error(), "database is locked") {
+		if strings.Contains(err.Error(), "database is locked") && !util.UsePostgresIndex() {
 			os.Exit(logging.ExitCodeUnavailableDatabase)
 		}
+		return
 	}
+	notePostgresTx(tx)
 	return
 }
 
@@ -1637,16 +1657,19 @@ func commitTx(tx *sql.Tx) (err error) {
 	}
 
 	closeTxPreparedStmts(tx)
+	unnotePostgresTx(tx)
 	return
 }
 
 func beginHistoryTx() (tx *sql.Tx, err error) {
 	if tx, err = historyDB.Begin(); err != nil {
 		logging.LogErrorf("begin history tx failed: %s\n  %s", err, logging.ShortStack())
-		if strings.Contains(err.Error(), "database is locked") {
+		if strings.Contains(err.Error(), "database is locked") && !util.UsePostgresIndex() {
 			os.Exit(logging.ExitCodeUnavailableDatabase)
 		}
+		return
 	}
+	notePostgresTx(tx)
 	return
 }
 
@@ -1661,16 +1684,19 @@ func commitHistoryTx(tx *sql.Tx) (err error) {
 	}
 
 	closeTxPreparedStmts(tx)
+	unnotePostgresTx(tx)
 	return
 }
 
 func beginAssetContentTx() (tx *sql.Tx, err error) {
 	if tx, err = assetContentDB.Begin(); err != nil {
 		logging.LogErrorf("begin asset content tx failed: %s\n  %s", err, logging.ShortStack())
-		if strings.Contains(err.Error(), "database is locked") {
+		if strings.Contains(err.Error(), "database is locked") && !util.UsePostgresIndex() {
 			os.Exit(logging.ExitCodeUnavailableDatabase)
 		}
+		return
 	}
+	notePostgresTx(tx)
 	return
 }
 
@@ -1685,6 +1711,7 @@ func commitAssetContentTx(tx *sql.Tx) (err error) {
 	}
 
 	closeTxPreparedStmts(tx)
+	unnotePostgresTx(tx)
 	return
 }
 
@@ -1751,6 +1778,7 @@ func prepareExecInsertTx(tx *sql.Tx, stmtSQL string, args []any) (err error) {
 
 	if _, err = stmt.Exec(args...); err != nil {
 		tx.Rollback()
+		unnotePostgresTx(tx)
 		logging.LogErrorf("exec database stmt [%s] failed: %s\n  %s", stmtSQL, err, logging.ShortStack())
 
 		if isRecoverableDBFileError(err) {
@@ -1765,9 +1793,17 @@ func prepareExecInsertTx(tx *sql.Tx, stmtSQL string, args []any) (err error) {
 	return
 }
 
+func execSQLiteFTSDelete(tx *sql.Tx, stmt string, args ...any) (err error) {
+	if isPostgresTx(tx) {
+		return nil
+	}
+	return execStmtTx(tx, stmt, args...)
+}
+
 func execStmtTx(tx *sql.Tx, stmt string, args ...any) (err error) {
 	if _, err = tx.Exec(stmt, args...); err != nil {
 		tx.Rollback()
+		unnotePostgresTx(tx)
 		logging.LogErrorf("exec database stmt [%s] failed: %s\n  %s", stmt, err, logging.ShortStack())
 
 		if isRecoverableDBFileError(err) {
@@ -2040,7 +2076,6 @@ func RemoveAllEncryptedDBFiles() {
 	}
 }
 
-// beginTxForBox 按 box 选 db 开事务。加密笔记本用其独立 db，否则用全局 db。
 // beginTxForBox 按 box 选 db 开事务。加密笔记本用其独立 db，否则用全局 db。
 // 加密笔记本未解锁时返回错误——绝不回退全局库，避免加密笔记本的索引写操作污染全局明文库。
 func beginTxForBox(box string) (tx *sql.Tx, err error) {

@@ -116,6 +116,15 @@ func queryBlockRowIDsTx(tx *sql.Tx, blocks []*Block) (ret map[string]int64, err 
 // 以便 FTS 删除旧 token 时仍能从 blocks 读到旧值。
 
 func updateRootContent(tx *sql.Tx, content, updated, ialContent, id string) (err error) {
+	if isPostgresTx(tx) {
+		stmt := "UPDATE blocks SET content = ?, fcontent = ?, updated = ?, ial = ? WHERE id = ?"
+		if err = execStmtTx(tx, stmt, content, content, updated, ialContent, id); err != nil {
+			return
+		}
+		removeBlockCache(id)
+		cache.RemoveBlockIAL(id)
+		return refreshBlockSearchID(tx, id)
+	}
 	var rowID int64
 	if rowID, err = blockRowIDByBlockID(tx, id); err != nil {
 		return
@@ -134,6 +143,19 @@ func updateRootContent(tx *sql.Tx, content, updated, ialContent, id string) (err
 }
 
 func updateBlockContent(tx *sql.Tx, block *Block) (err error) {
+	if isPostgresTx(tx) {
+		stmt := "UPDATE blocks SET content = ? WHERE id = ?"
+		if err = execStmtTx(tx, stmt, block.Content, block.ID); err != nil {
+			tx.Rollback()
+			unnotePostgresTx(tx)
+			return
+		}
+		if err = refreshBlockSearchID(tx, block.ID); err != nil {
+			return
+		}
+		putBlockCache(block)
+		return
+	}
 	var rowID int64
 	if rowID, err = blockRowIDByBlockID(tx, block.ID); err != nil {
 		tx.Rollback()
@@ -172,6 +194,15 @@ func indexNode(tx *sql.Tx, id, boxID string) (err error) {
 
 	content := nodeStaticContent(node, nil, true, indexAssetPath, true, true)
 	content = strings.ReplaceAll(content, editor.Zwsp, "")
+	if isPostgresTx(tx) {
+		stmt := "UPDATE blocks SET content = ? WHERE id = ?"
+		if err = execStmtTx(tx, stmt, content, id); err != nil {
+			tx.Rollback()
+			unnotePostgresTx(tx)
+			return
+		}
+		return refreshBlockSearchID(tx, id)
+	}
 	var rowID int64
 	if rowID, err = blockRowIDByBlockID(tx, id); err != nil {
 		tx.Rollback()

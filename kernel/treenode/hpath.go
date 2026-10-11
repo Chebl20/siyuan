@@ -7,11 +7,19 @@ import (
 	"strings"
 
 	"github.com/88250/lute/parse"
+	"github.com/siyuan-note/siyuan/kernel/util"
 )
 
 var ErrHPathRefreshBusy = errors.New("blocktree writer is busy")
 
 const blockHPathBatchQuery = "SELECT rowid FROM blocktrees WHERE root_id = ? AND box_id = ? AND path = ? AND rowid > ? ORDER BY rowid LIMIT ?"
+
+func blockTreeRowTable(boxID string) string {
+	if util.UsePostgresIndex() && (IsEncryptedBoxFn == nil || !IsEncryptedBoxFn(boxID)) {
+		return "blocktrees_row"
+	}
+	return "blocktrees"
+}
 
 func ensureHPathIndexes(database *sql.DB) error {
 	for _, stmt := range []string{
@@ -122,7 +130,9 @@ func RefreshBlockHPathsBatch(doc *BlockTree, after int64, limit int, apply func(
 	}
 	defer tx.Rollback()
 	// 多读取一行判断是否还有下一批，末批在当前事务中确认完成。
-	rows, err := tx.Query(blockHPathBatchQuery, doc.ID, doc.BoxID, doc.Path, after, limit+1)
+	table := blockTreeRowTable(doc.BoxID)
+	batchQuery := strings.Replace(blockHPathBatchQuery, "FROM blocktrees", "FROM "+table, 1)
+	rows, err := tx.Query(batchQuery, doc.ID, doc.BoxID, doc.Path, after, limit+1)
 	if err != nil {
 		return after, false, err
 	}
@@ -144,7 +154,7 @@ func RefreshBlockHPathsBatch(doc *BlockTree, after int64, limit int, apply func(
 		return after, false, err
 	}
 	if count > 0 {
-		if _, err = tx.Exec("UPDATE blocktrees SET hpath = ? WHERE root_id = ? AND box_id = ? AND path = ? AND rowid > ? AND rowid <= ? AND hpath != ?", doc.HPath, doc.ID, doc.BoxID, doc.Path, after, last, doc.HPath); err != nil {
+		if _, err = tx.Exec("UPDATE "+table+" SET hpath = ? WHERE root_id = ? AND box_id = ? AND path = ? AND rowid > ? AND rowid <= ? AND hpath != ?", doc.HPath, doc.ID, doc.BoxID, doc.Path, after, last, doc.HPath); err != nil {
 			return after, false, err
 		}
 	}

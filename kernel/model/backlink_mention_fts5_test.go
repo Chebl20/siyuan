@@ -118,7 +118,7 @@ func TestBacklinkMentionFilteredPagination(t *testing.T) {
 				sql.UpdateRefsTreeQueue(tree)
 			}
 			sql.FlushQueue()
-			query, args := buildBackmentionQuery(columnFilter()+`:("needle" OR "broad")`, fixture.sourceID, "", 64)
+			query, args := buildBackmentionQuery(columnFilter()+`:("needle" OR "broad")`, fixture.sourceID, "", 64, boxID)
 			if candidates := sql.SelectBlocksRawStmtArgsInBox(query, args, 64, boxID); len(candidates) != len(ids) {
 				var candidateIDs []string
 				for _, candidate := range candidates {

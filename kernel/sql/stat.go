@@ -18,6 +18,7 @@ package sql
 
 import (
 	"database/sql"
+	"errors"
 	"strings"
 
 	"github.com/siyuan-note/logging"
@@ -34,7 +35,7 @@ func getDatabaseVer() (ret string) {
 	stmt := "SELECT value FROM stat WHERE `key` = ?"
 	row := db.QueryRow(stmt, key)
 	if err := row.Scan(&ret); err != nil {
-		if !strings.Contains(err.Error(), "no such table") {
+		if !errors.Is(err, sql.ErrNoRows) && !strings.Contains(err.Error(), "no such table") && !strings.Contains(err.Error(), "does not exist") {
 			logging.LogErrorf("query database version failed: %s", err)
 		}
 	}

@@ -33,10 +33,18 @@ import (
 	ignore "github.com/sabhiram/go-gitignore"
 	"github.com/siyuan-note/eventbus"
 	"github.com/siyuan-note/logging"
+	"github.com/siyuan-note/siyuan/kernel/indexstore"
 	"github.com/siyuan-note/siyuan/kernel/util"
 )
 
 var luteEngine = util.NewLute()
+
+func prepareIDUpsertTx(tx *sql.Tx, stmt string, args []any) error {
+	if isPostgresTx(tx) {
+		stmt = indexstore.ConflictUpdate(stmt, []string{"id"})
+	}
+	return prepareExecInsertTx(tx, stmt, args)
+}
 
 func init() {
 	luteEngine.RenderOptions.KramdownBlockIAL = false // 数据库 markdown 字段为标准 md，但是要保留 span block ial
@@ -119,7 +127,19 @@ func insertBlocks0(tx *sql.Tx, bulk []*Block, context map[string]any) (err error
 	}
 
 	stmt := fmt.Sprintf(BlocksInsert, strings.Join(valueStrings, ","))
+	if isPostgresTx(tx) {
+		stmt = indexstore.ConflictUpdate(stmt, []string{"id"})
+	}
 	if err = prepareExecInsertTx(tx, stmt, valueArgs); err != nil {
+		return
+	}
+	if isPostgresTx(tx) {
+		if err = refreshBlockSearchRows(tx, bulk); err != nil {
+			return
+		}
+		hashBuf.WriteString("blocks")
+		evtHash := fmt.Sprintf("%x", sha256.Sum256(hashBuf.Bytes()))[:7]
+		eventbus.Publish(eventbus.EvtSQLInsertBlocksFTS, context, len(bulk), evtHash)
 		return
 	}
 	hashBuf.WriteString("blocks")
@@ -221,7 +241,10 @@ func insertAttribute0(tx *sql.Tx, bulk []*Attribute) (err error) {
 		valueArgs = append(valueArgs, attr.Path)
 	}
 	stmt := fmt.Sprintf("INSERT INTO attributes (id, name, value, type, block_id, root_id, box, path) VALUES %s", strings.Join(valueStrings, ","))
-	err = prepareExecInsertTx(tx, stmt, valueArgs)
+	if isPostgresTx(tx) {
+		stmt = indexstore.ConflictUpdate(stmt, []string{"id"})
+	}
+	err = prepareIDUpsertTx(tx, stmt, valueArgs)
 	return
 }
 
@@ -270,7 +293,7 @@ func insertAsset0(tx *sql.Tx, bulk []*Asset) (err error) {
 		valueArgs = append(valueArgs, asset.Hash)
 	}
 	stmt := fmt.Sprintf("INSERT INTO assets (id, block_id, root_id, box, docpath, path, name, title, hash) VALUES %s", strings.Join(valueStrings, ","))
-	err = prepareExecInsertTx(tx, stmt, valueArgs)
+	err = prepareIDUpsertTx(tx, stmt, valueArgs)
 	return
 }
 
@@ -319,7 +342,7 @@ func insertSpans0(tx *sql.Tx, bulk []*Span) (err error) {
 		valueArgs = append(valueArgs, span.IAL)
 	}
 	stmt := fmt.Sprintf(SpansInsert, strings.Join(valueStrings, ","))
-	err = prepareExecInsertTx(tx, stmt, valueArgs)
+	err = prepareIDUpsertTx(tx, stmt, valueArgs)
 	return
 }
 
@@ -382,7 +405,7 @@ func insertRefs0(tx *sql.Tx, bulk []*Ref) (err error) {
 		putRefCache(ref.Box, ref)
 	}
 	stmt := fmt.Sprintf("INSERT INTO refs (id, def_block_id, def_block_parent_id, def_block_root_id, def_block_path, block_id, root_id, box, path, content, markdown, type) VALUES %s", strings.Join(valueStrings, ","))
-	err = prepareExecInsertTx(tx, stmt, valueArgs)
+	err = prepareIDUpsertTx(tx, stmt, valueArgs)
 	return
 }
 
@@ -431,7 +454,7 @@ func insertFileAnnotationRefs0(tx *sql.Tx, bulk []*FileAnnotationRef) (err error
 		valueArgs = append(valueArgs, ref.Type)
 	}
 	stmt := fmt.Sprintf("INSERT INTO file_annotation_refs (id, file_path, annotation_id, block_id, root_id, box, path, content, type) VALUES %s", strings.Join(valueStrings, ","))
-	err = prepareExecInsertTx(tx, stmt, valueArgs)
+	err = prepareIDUpsertTx(tx, stmt, valueArgs)
 	return
 }
 

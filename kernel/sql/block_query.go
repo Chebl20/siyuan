@@ -1135,6 +1135,9 @@ func GetRootUpdated() (ret map[string]string, err error) {
 }
 
 func GetDuplicatedRootIDs(blocksTable string) (ret []string) {
+	if UsePostgres() && blocksTable == "blocks_fts" {
+		blocksTable = "blocks"
+	}
 	rows, err := query("SELECT DISTINCT root_id FROM `" + blocksTable + "` GROUP BY id HAVING COUNT(*) > 1")
 	if err != nil {
 		logging.LogErrorf("sql query failed: %s", err)

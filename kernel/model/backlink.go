@@ -1059,15 +1059,39 @@ func quoteFTSPhrase(phrase string) string {
 	return "\"" + strings.ReplaceAll(phrase, "\"", "\"\"") + "\""
 }
 
-func buildBackmentionQuery(matchExpression, rootID, beforeID string, limit int) (query string, args []any) {
-	query = "SELECT * FROM blocks_fts WHERE blocks_fts MATCH ? AND root_id != ?" +
-		" AND type IN ('d', 'h', 'p', 't')"
+func postgresMentionQuery(keywords []string, keyword string) string {
+	parts := make([]string, 0, len(keywords)+1)
+	for _, item := range keywords {
+		parts = append(parts, `"`+strings.ReplaceAll(item, `"`, ``)+`"`)
+	}
+	if keyword != "" {
+		parts = append(parts, `"`+strings.ReplaceAll(keyword, `"`, ``)+`"`)
+	}
+	return strings.Join(parts, " OR ")
+}
+
+func buildBackmentionQuery(matchExpression, rootID, beforeID string, limit int, boxID string) (query string, args []any) {
+	if sql.PostgresPlain(boxID) {
+		query = "SELECT * FROM blocks b WHERE EXISTS (SELECT 1 FROM block_search s WHERE s.id = b.id AND s.search_vector @@ websearch_to_tsquery('simple', ?)) AND b.root_id != ?" +
+			" AND b.type IN ('d', 'h', 'p', 't')"
+	} else {
+		query = "SELECT * FROM blocks_fts WHERE blocks_fts MATCH ? AND root_id != ?" +
+			" AND type IN ('d', 'h', 'p', 't')"
+	}
 	args = []any{matchExpression, rootID}
 	if "" != beforeID {
-		query += " AND id < ?"
+		if sql.PostgresPlain(boxID) {
+			query += " AND b.id < ?"
+		} else {
+			query += " AND id < ?"
+		}
 		args = append(args, beforeID)
 	}
-	query += " ORDER BY id DESC LIMIT ?"
+	if sql.PostgresPlain(boxID) {
+		query += " ORDER BY b.id DESC LIMIT ?"
+	} else {
+		query += " ORDER BY id DESC LIMIT ?"
+	}
 	args = append(args, limit)
 	return
 }
@@ -1106,7 +1130,11 @@ func searchBackmentionInBox(mentionKeywords []string, keyword string, excludeBac
 	beforeID := ""
 	// 按块 ID 分批补取候选，正文校验和反链排除后的有效提及才占用结果额度。
 	for len(ret) < limit {
-		query, args := buildBackmentionQuery(buf.String(), rootID, beforeID, limit)
+		matchExpression := buf.String()
+		if sql.PostgresPlain(boxID) {
+			matchExpression = postgresMentionQuery(mentionKeywords, keyword)
+		}
+		query, args := buildBackmentionQuery(matchExpression, rootID, beforeID, limit, boxID)
 		sqlBlocks := sql.SelectBlocksRawStmtArgsInBox(query, args, limit, boxID)
 		if len(sqlBlocks) == 0 {
 			break

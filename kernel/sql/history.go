@@ -24,6 +24,8 @@ import (
 
 	"github.com/siyuan-note/eventbus"
 	"github.com/siyuan-note/logging"
+	"github.com/siyuan-note/siyuan/kernel/indexstore"
+	"github.com/siyuan-note/siyuan/kernel/search"
 )
 
 type History struct {
@@ -163,8 +165,22 @@ func insertHistories0(tx *sql.Tx, bulk []*History, context map[string]any) (err 
 	}
 
 	stmt := fmt.Sprintf(HistoriesFTSCaseInsensitiveInsert, strings.Join(valueStrings, ","))
+	if isPostgresTx(tx) {
+		stmt = strings.Replace(stmt, "histories_fts_case_insensitive", "histories", 1)
+		stmt = indexstore.ConflictUpdate(stmt, []string{"path", "created", "op"})
+	}
 	if err = prepareExecInsertTx(tx, stmt, valueArgs); err != nil {
 		return
+	}
+	if isPostgresTx(tx) {
+		for _, history := range bulk {
+			text := search.NormalizeSearchText(history.Title+"\n"+history.Content, caseSensitive, hanSensitive)
+			searchStmt := `INSERT INTO history_search (path, created, op, search_vector) VALUES (?, ?, ?, to_tsvector('simple', ?))
+				ON CONFLICT (path, created, op) DO UPDATE SET search_vector = EXCLUDED.search_vector`
+			if err = execStmtTx(tx, searchStmt, history.Path, history.Created, history.Op, text); err != nil {
+				return
+			}
+		}
 	}
 
 	eventbus.Publish(eventbus.EvtSQLInsertHistory, context)

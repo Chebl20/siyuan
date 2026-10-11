@@ -1,0 +1,52 @@
+# Coolify: one SiYuan container, one workspace volume, one PostgreSQL index.
+# The official image stays volume-only. This file is the optional postgres deployment.
+# Do not scale siyuan. Two writers on the same workspace still corrupt .sy files.
+
+services:
+  siyuan:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command: ["serve"]
+    ports:
+      - "6806:6806"
+    volumes:
+      - siyuan_workspace:/siyuan/workspace
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      SIYUAN_ACCESS_AUTH_CODE: ${ACCESS_AUTH_CODE:-}
+      STORAGE_DRIVER: postgres
+      DATABASE_URL: postgresql://${POSTGRES_USER:-siyuan}:${POSTGRES_PASSWORD:-siyuan}@postgres:5432/${POSTGRES_DB:-siyuan}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+    healthcheck:
+      test: ["CMD", "/opt/siyuan/kernel", "health"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-siyuan}
+      POSTGRES_USER: ${POSTGRES_USER:-siyuan}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-siyuan}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  siyuan_workspace:
+  postgres_data:

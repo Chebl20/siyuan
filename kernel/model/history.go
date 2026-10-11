@@ -812,16 +812,23 @@ func FullTextSearchHistoryItems(created, query, box, op string, typ int) (ret []
 func buildSearchHistoryQueryFilter(query, op, box, table string, typ int) (stmt string) {
 	if "" != query {
 		switch typ {
-		case HistoryTypeDocName:
-			stmt += table + " MATCH '{title}:(" + query + ")'"
-		case HistoryTypeDoc:
-			stmt += table + " MATCH '{title content}:(" + query + ")'"
 		case HistoryTypeDocID:
 			stmt += " id = '" + query + "'"
-		case HistoryTypeAsset:
-			stmt += table + " MATCH '{title content}:(" + query + ")'"
-		case HistoryTypeDatabase:
-			stmt += table + " MATCH '{content}:(" + query + ")'"
+		default:
+			if sql.UsePostgres() {
+				stmt += historyVectorFilter(table, query)
+			} else {
+				switch typ {
+				case HistoryTypeDocName:
+					stmt += table + " MATCH '{title}:(" + query + ")'"
+				case HistoryTypeDoc:
+					stmt += table + " MATCH '{title content}:(" + query + ")'"
+				case HistoryTypeAsset:
+					stmt += table + " MATCH '{title content}:(" + query + ")'"
+				case HistoryTypeDatabase:
+					stmt += table + " MATCH '{content}:(" + query + ")'"
+				}
+			}
 		}
 	} else {
 		stmt += "1=1"
@@ -848,6 +855,12 @@ func buildSearchHistoryQueryFilter(query, op, box, table string, typ int) (stmt 
 	ago := time.Now().Add(-24 * time.Hour * time.Duration(Conf.Editor.HistoryRetentionDays))
 	stmt += " AND CAST(created AS INTEGER) > " + fmt.Sprintf("%d", ago.Unix()) + ""
 	return
+}
+
+func historyVectorFilter(table, query string) string {
+	quoted := strings.ReplaceAll(query, "'", "''")
+	return "EXISTS (SELECT 1 FROM history_search hs WHERE hs.path = " + table + ".path AND hs.created = " + table +
+		".created AND hs.op = " + table + ".op AND hs.search_vector @@ websearch_to_tsquery('simple', '" + quoted + "'))"
 }
 
 func GetNotebookHistory() (ret []*History, err error) {

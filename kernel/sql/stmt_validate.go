@@ -195,6 +195,28 @@ func CheckReadonlyStatementInBox(stmt, boxID string) error {
 	return checkReadonlyStatement(stmt, targetDB)
 }
 
+func isPostgresDB(target *sql.DB) bool {
+	if !UsePostgres() || target == nil {
+		return false
+	}
+	return target == db || target == historyDB || target == assetContentDB
+}
+
+// checkPostgresReadonlySQL 只允许 SELECT / WITH，并拒绝 SQLite FTS 方言。
+// 加密笔记本仍走 SQLCipher 上的 sqlite3_stmt_readonly，不经过这里。
+func checkPostgresReadonlySQL(stmt string) error {
+	if !isReadonlyQueryStatement(stmt) {
+		return errors.New("SQL statement is not a read-only query")
+	}
+	upper := strings.ToUpper(stmt)
+	for _, banned := range []string{"MATCH", "ATTACH", "DETACH", "REGEXP(", "SEARCH_NORMALIZE(", "FTS5", "PRAGMA"} {
+		if strings.Contains(upper, banned) {
+			return fmt.Errorf("SQL dialect is not supported when STORAGE_DRIVER=postgres: %s", banned)
+		}
+	}
+	return nil
+}
+
 func checkReadonlyStatement(stmt string, targetDB *sql.DB) error {
 	if strings.TrimSpace(stmt) == "" {
 		return errors.New("SQL statement is empty")
@@ -204,6 +226,9 @@ func checkReadonlyStatement(stmt string, targetDB *sql.DB) error {
 	}
 	if nil == targetDB {
 		return errors.New("database is nil")
+	}
+	if isPostgresDB(targetDB) {
+		return checkPostgresReadonlySQL(stmt)
 	}
 	ctx := context.Background()
 	conn, err := targetDB.Conn(ctx)
