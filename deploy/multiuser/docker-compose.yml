@@ -1,0 +1,52 @@
+services:
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/multiuser/Dockerfile
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      BASE_DOMAIN: ${BASE_DOMAIN}
+      APP_HOST: ${APP_HOST}
+      COOKIE_SECRET: ${COOKIE_SECRET}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      WORKSPACE_ROOT: /workspaces
+      DOCKER_WORKSPACE_ROOT: ${WORKSPACE_ROOT}
+      SIYUAN_IMAGE: ${SIYUAN_IMAGE}
+      MULTIUSER_NETWORK: ${MULTIUSER_NETWORK:-siyuan-multiuser_internal}
+      SIGNUP_ENABLED: ${SIGNUP_ENABLED:-true}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${WORKSPACE_ROOT}:/workspaces
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: siyuan_gateway
+      POSTGRES_USER: siyuan_gateway
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - gateway_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U siyuan_gateway -d siyuan_gateway"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+networks:
+  default:
+    name: ${MULTIUSER_NETWORK:-siyuan-multiuser_internal}
+
+volumes:
+  gateway_postgres:

@@ -5,32 +5,23 @@ ARG NPM_REGISTRY=
 WORKDIR /app
 ADD app/package.json app/pnpm* app/.npmrc .
 
-RUN <<EORUN
-#!/bin/bash -e
-corepack enable
-corepack install --global $(node -e 'console.log(require("./package.json").packageManager)')
-npm config set registry ${NPM_REGISTRY}
-pnpm install --silent
-EORUN
+RUN corepack enable \
+    && corepack install --global "$(node -p 'require("./package.json").packageManager')" \
+    && npm config set registry "${NPM_REGISTRY}" \
+    && pnpm install --silent
 
 ADD app/ .
-RUN <<EORUN
-#!/bin/bash -e
-pnpm run build
-node scripts/trimChangelogs.js
-mkdir /artifacts
-mv appearance stage guide /artifacts/
-if [ -d changelogs ]; then mv changelogs /artifacts/; fi
-EORUN
+RUN pnpm run build \
+    && node scripts/trimChangelogs.js \
+    && mkdir /artifacts \
+    && mv appearance stage guide /artifacts/ \
+    && if [ -d changelogs ]; then mv changelogs /artifacts/; fi
 
 FROM golang:1.26-alpine AS go-build
 
-RUN <<EORUN
-#!/bin/sh -e
-apk add --no-cache gcc musl-dev
-go env -w GO111MODULE=on
-go env -w CGO_ENABLED=1
-EORUN
+RUN apk add --no-cache gcc musl-dev \
+    && go env -w GO111MODULE=on \
+    && go env -w CGO_ENABLED=1
 
 WORKDIR /kernel
 ADD kernel/go.* .

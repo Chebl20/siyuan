@@ -1,0 +1,5 @@
+node_modules
+app/node_modules
+.git
+app/stage/build
+app/src/types/dist
